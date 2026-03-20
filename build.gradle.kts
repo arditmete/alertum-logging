@@ -4,7 +4,7 @@ plugins {
     signing
 }
 
-group = "io.alertum"
+group = "io.github.arditmete"
 version = "1.0.1"
 
 repositories {
@@ -21,19 +21,45 @@ dependencies {
 }
 
 publishing {
+    publications {
+        create<MavenPublication>("mavenJava") {
+            from(components["java"])
+
+            artifactId = "alertum-logging"
+
+            pom {
+                name.set("Alertum Logging")
+                description.set("Logging SDK for Alertum platform")
+                url.set("https://github.com/arditmete/alertum-logging")
+
+                licenses {
+                    license {
+                        name.set("MIT License")
+                        url.set("https://opensource.org/licenses/MIT")
+                    }
+                }
+
+                developers {
+                    developer {
+                        id.set("arditmete")
+                        name.set("Ardit Mete")
+                        email.set("product@alertum.co")
+                    }
+                }
+
+                scm {
+                    url.set("https://github.com/arditmete/alertum-logging")
+                    connection.set("scm:git:git://github.com/arditmete/alertum-logging.git")
+                    developerConnection.set("scm:git:ssh://github.com/arditmete/alertum-logging.git")
+                }
+            }
+        }
+    }
+
     repositories {
         maven {
-            name = "sonatype"
-            url = uri(
-                    if (version.toString().endsWith("SNAPSHOT"))
-                        "https://s01.oss.sonatype.org/content/repositories/snapshots/"
-                    else
-                        "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
-            )
-            credentials {
-                username = System.getenv("OSSRH_USERNAME")
-                password = System.getenv("OSSRH_PASSWORD")
-            }
+            name = "bundleRepo"
+            url = uri(layout.buildDirectory.dir("repo"))
         }
     }
 }
@@ -43,10 +69,14 @@ signing {
     sign(publishing.publications)
 }
 
+/**
+ * Bundle required by Maven Central Portal
+ */
 tasks.register<Zip>("bundleRelease") {
-    dependsOn("publishToMavenLocal")
+    dependsOn("publishAllPublicationsToBundleRepoRepository")
 
-    from(layout.buildDirectory.dir("publications/mavenJava"))
+    from(layout.buildDirectory.dir("repo"))
+
     archiveFileName.set("bundle.zip")
     destinationDirectory.set(layout.buildDirectory.dir("bundle"))
 }
