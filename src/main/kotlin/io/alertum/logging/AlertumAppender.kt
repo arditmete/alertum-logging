@@ -22,13 +22,13 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
     private var ingestionKey: String = ""
 
     @Volatile
-    private var endpoint: String = DEFAULT_ENDPOINT
+    private var endpoint: String = AlertumDefaults.DEFAULT_ENDPOINT
 
     @Volatile
-    private var service: String = DEFAULT_SERVICE
+    private var service: String = AlertumDefaults.DEFAULT_SERVICE
 
     @Volatile
-    private var environment: String = DEFAULT_ENVIRONMENT
+    private var environment: String = AlertumDefaults.DEFAULT_ENVIRONMENT
 
     @Volatile
     private var batchSize: Int = DEFAULT_BATCH_SIZE
@@ -67,15 +67,15 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
     }
 
     fun setEndpoint(value: String) {
-        endpoint = value.trim().ifEmpty { DEFAULT_ENDPOINT }
+        endpoint = value.trim().ifEmpty { AlertumDefaults.DEFAULT_ENDPOINT }
     }
 
     fun setService(value: String) {
-        service = value.trim().ifEmpty { DEFAULT_SERVICE }
+        service = value.trim().ifEmpty { AlertumDefaults.DEFAULT_SERVICE }
     }
 
     fun setEnvironment(value: String) {
-        environment = value.trim().ifEmpty { DEFAULT_ENVIRONMENT }
+        environment = value.trim().ifEmpty { AlertumDefaults.DEFAULT_ENVIRONMENT }
     }
 
     fun setBatchSize(value: Int) {
@@ -118,12 +118,12 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
 
         if (service.isBlank()) {
             addWarn("AlertumAppender service is blank; using default value.")
-            service = DEFAULT_SERVICE
+            service = AlertumDefaults.DEFAULT_SERVICE
         }
 
         if (environment.isBlank()) {
             addWarn("AlertumAppender environment is blank; using default value.")
-            environment = DEFAULT_ENVIRONMENT
+            environment = AlertumDefaults.DEFAULT_ENVIRONMENT
         }
 
         queue = LinkedBlockingQueue(queueCapacity)
@@ -252,6 +252,14 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         val httpMethod = mdc["httpMethod"]?.takeIf { it.isNotBlank() }
         val statusCode = mdc["statusCode"]?.toLongOrNull()
         val durationMs = mdc["durationMs"]?.toLongOrNull()
+        val mdcService = mdc["service"]?.takeIf { it.isNotBlank() }
+        val mdcEnvironment = mdc["environment"]?.takeIf { it.isNotBlank() }
+        val serviceValue = when {
+            mdcService == null -> service
+            mdcService == AlertumDefaults.DEFAULT_SERVICE && service != AlertumDefaults.DEFAULT_SERVICE -> service
+            else -> mdcService
+        }
+        val environmentValue = mdcEnvironment ?: environment
         val tags = mdc["tags"]
                 ?.split(",")
                 ?.map { it.trim() }
@@ -281,6 +289,26 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
             sb.append('"').append(name).append('"').append(':').append(value)
         }
 
+        fun appendNullableString(name: String, value: String?) {
+            appendCommaIfNeeded()
+            sb.append('"').append(name).append('"').append(':')
+            if (value == null) {
+                sb.append("null")
+            } else {
+                sb.append('"').append(escape(value)).append('"')
+            }
+        }
+
+        fun appendNullableNumber(name: String, value: Long?) {
+            appendCommaIfNeeded()
+            sb.append('"').append(name).append('"').append(':')
+            if (value == null) {
+                sb.append("null")
+            } else {
+                sb.append(value)
+            }
+        }
+
         fun appendOptionalString(name: String, value: String?) {
             if (value != null) appendString(name, value)
         }
@@ -304,19 +332,19 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         appendString("level", event.level.levelStr)
         appendString("logger", event.loggerName ?: "unknown-logger")
         appendNumber("timestamp", event.timeStamp)
-        appendString("service", service)
-        appendString("environment", environment)
+        appendString("service", serviceValue)
+        appendString("environment", environmentValue)
         appendString("thread", event.threadName ?: "unknown-thread")
-        appendOptionalString("traceId", traceId)
+        appendNullableString("traceId", traceId)
         appendOptionalString("spanId", spanId)
         appendOptionalString("parentSpanId", parentSpanId)
         appendOptionalString("requestId", requestId)
         appendOptionalString("teamId", teamId)
         appendOptionalString("userId", userId)
-        appendOptionalString("endpoint", endpointValue)
-        appendOptionalString("httpMethod", httpMethod)
-        appendOptionalNumber("statusCode", statusCode)
-        appendOptionalNumber("durationMs", durationMs)
+        appendNullableString("endpoint", endpointValue)
+        appendNullableString("httpMethod", httpMethod)
+        appendNullableNumber("statusCode", statusCode)
+        appendNullableNumber("durationMs", durationMs)
         appendStringArray("tags", tags)
 
         if (exceptionMessage != null || throwableClass != null) {
@@ -448,7 +476,11 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
 
     private fun ingestUri(): URI {
         val base = endpoint.trim().removeSuffix("/")
-        return URI.create("$base/api/logs/ingest")
+        return when {
+            base.endsWith("/api/logs/ingest") -> URI.create(base)
+            base.endsWith("/api/logs") -> URI.create("$base/ingest")
+            else -> URI.create("$base/api/logs/ingest")
+        }
     }
 
     private fun gzip(value: String): ByteArray {
@@ -485,10 +517,6 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
     }
 
     companion object {
-        private const val DEFAULT_ENDPOINT = "https://api.alertum.co"
-        private const val DEFAULT_SERVICE = "unknown-service"
-        private const val DEFAULT_ENVIRONMENT = ""
-
         private const val DEFAULT_BATCH_SIZE = 50
         private const val DEFAULT_FLUSH_INTERVAL_MILLIS = 1000L
         private const val DEFAULT_QUEUE_CAPACITY = 2000

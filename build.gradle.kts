@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.arditmete"
-version = "1.0.1"
+version = "1.0.2"
 
 repositories {
     mavenCentral()
@@ -18,6 +18,9 @@ java {
 
 dependencies {
     implementation("ch.qos.logback:logback-classic:1.4.14")
+    compileOnly("org.springframework.boot:spring-boot-autoconfigure:3.2.5")
+    compileOnly("org.springframework:spring-web:6.1.6")
+    compileOnly("jakarta.servlet:jakarta.servlet-api:6.0.0")
 }
 
 publishing {
