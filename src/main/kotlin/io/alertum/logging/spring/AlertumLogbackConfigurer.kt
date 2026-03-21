@@ -37,14 +37,12 @@ class AlertumLogbackConfigurer(
     }
 
     private fun applyProperties(appender: AlertumAppender) {
-        if (properties.hasService()) {
-            appender.setService(properties.serviceOrDefault())
+        properties.apiKeyOrNull()?.let {
+            appender.setIngestionKey(it)
         }
-        if (properties.hasEnvironment()) {
-            appender.setEnvironment(properties.environmentOrDefault())
-        }
-        if (properties.hasEndpoint()) {
-            appender.setEndpoint(properties.endpointOrDefault())
-        }
+
+        appender.setEndpoint(properties.endpointOrDefault())
+        appender.setService(properties.serviceOrDefault())
+        appender.setEnvironment(properties.environmentOrDefault())
     }
 }

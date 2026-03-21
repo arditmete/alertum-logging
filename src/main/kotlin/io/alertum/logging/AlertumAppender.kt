@@ -111,20 +111,18 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
     override fun start() {
         if (isStarted) return
 
-        if (ingestionKey.isBlank()) {
-            addWarn("AlertumAppender ingestionKey is blank; appender will not start.")
+        if (ingestionKey.isBlank() || ingestionKey.contains("\${")) {
+            addWarn("AlertumAppender disabled: ingestionKey missing or unresolved")
             return
         }
 
-        if (service.isBlank()) {
-            addWarn("AlertumAppender service is blank; using default value.")
-            service = AlertumDefaults.DEFAULT_SERVICE
+        if (endpoint.isBlank() || endpoint.contains("\${")) {
+            addWarn("AlertumAppender disabled: endpoint missing or unresolved")
+            return
         }
 
-        if (environment.isBlank()) {
-            addWarn("AlertumAppender environment is blank; using default value.")
-            environment = AlertumDefaults.DEFAULT_ENVIRONMENT
-        }
+        service = service.trim().ifBlank { AlertumDefaults.DEFAULT_SERVICE }
+        environment = environment.trim()
 
         queue = LinkedBlockingQueue(queueCapacity)
 
@@ -134,6 +132,8 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
                 start()
             }
         }
+
+        addInfo("AlertumAppender started → endpoint=$endpoint service=$service environment=$environment")
 
         super.start()
     }

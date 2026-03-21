@@ -2,9 +2,7 @@ package io.alertum.logging.spring
 
 import ch.qos.logback.classic.LoggerContext
 import io.alertum.logging.AlertumAppender
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
-import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication
+import org.springframework.boot.autoconfigure.condition.*
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.web.servlet.FilterRegistrationBean
 import org.springframework.context.annotation.Bean
@@ -15,12 +13,13 @@ import org.springframework.web.filter.OncePerRequestFilter
 @Configuration
 @EnableConfigurationProperties(AlertumLoggingProperties::class)
 @ConditionalOnClass(AlertumAppender::class)
+@ConditionalOnProperty(prefix = "alertum.logging", name = ["enabled"], havingValue = "true", matchIfMissing = true)
 class AlertumLoggingAutoConfiguration {
 
     @Bean
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     @ConditionalOnClass(OncePerRequestFilter::class)
-    @ConditionalOnMissingBean(AlertumHttpMdcFilter::class)
+    @ConditionalOnMissingBean
     fun alertumHttpMdcFilter(properties: AlertumLoggingProperties): AlertumHttpMdcFilter {
         return AlertumHttpMdcFilter(properties)
     }
@@ -28,9 +27,9 @@ class AlertumLoggingAutoConfiguration {
     @Bean
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     @ConditionalOnClass(FilterRegistrationBean::class)
-    @ConditionalOnMissingBean(name = ["alertumHttpMdcFilterRegistration"])
+    @ConditionalOnMissingBean
     fun alertumHttpMdcFilterRegistration(
-        filter: AlertumHttpMdcFilter
+            filter: AlertumHttpMdcFilter
     ): FilterRegistrationBean<AlertumHttpMdcFilter> {
         return FilterRegistrationBean(filter).apply {
             order = Ordered.HIGHEST_PRECEDENCE + FILTER_ORDER_OFFSET
@@ -39,7 +38,7 @@ class AlertumLoggingAutoConfiguration {
 
     @Bean
     @ConditionalOnClass(LoggerContext::class)
-    @ConditionalOnMissingBean(AlertumLogbackConfigurer::class)
+    @ConditionalOnMissingBean
     fun alertumLogbackConfigurer(properties: AlertumLoggingProperties): AlertumLogbackConfigurer {
         return AlertumLogbackConfigurer(properties)
     }

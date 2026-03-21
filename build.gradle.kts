@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm") version "1.9.25"
+    kotlin("plugin.spring") version "1.9.25"
     `maven-publish`
     signing
 }
@@ -18,6 +19,7 @@ java {
 
 dependencies {
     implementation("ch.qos.logback:logback-classic:1.4.14")
+    annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
     compileOnly("org.springframework.boot:spring-boot-autoconfigure:3.2.5")
     compileOnly("org.springframework:spring-web:6.1.6")
     compileOnly("jakarta.servlet:jakarta.servlet-api:6.0.0")
