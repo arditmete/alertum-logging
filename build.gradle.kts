@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "io.github.arditmete"
-version = "1.0.3"
+version = "1.0.12"
 
 repositories {
     mavenCentral()

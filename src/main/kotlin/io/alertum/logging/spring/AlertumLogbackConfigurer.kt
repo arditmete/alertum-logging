@@ -41,8 +41,18 @@ class AlertumLogbackConfigurer(
             appender.setIngestionKey(it)
         }
 
-        appender.setEndpoint(properties.endpointOrDefault())
-        appender.setService(properties.serviceOrDefault())
-        appender.setEnvironment(properties.environmentOrDefault())
+        properties.endpoint?.trim()?.takeIf { it.isNotBlank() }?.let {
+            appender.setEndpoint(it)
+        }
+        properties.service?.trim()?.takeIf { it.isNotBlank() }?.let {
+            appender.setService(it)
+        }
+        properties.environment?.trim()?.takeIf { it.isNotBlank() }?.let {
+            appender.setEnvironment(it)
+        }
+
+        if (!appender.isStarted) {
+            appender.start()
+        }
     }
 }

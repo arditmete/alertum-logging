@@ -1,0 +1,129 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "io.github.arditmete",
+    "module": "alertum-logging",
+    "version": "1.0.12",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "7.5"
+    }
+  },
+  "variants": [
+    {
+      "name": "apiElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-api",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "1.9.25"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "alertum-logging-1.0.12.jar",
+          "url": "alertum-logging-1.0.12.jar",
+          "size": 30134,
+          "sha512": "6cd222b4baed422ab74de3761173328d5d4d211822ff302f6d95aeffb688aca9c0fc83fa371c95f75a2e3e847e536ba92f0f614a3e284220d75218aa5e40bc53",
+          "sha256": "cabe4fd3c8f73b7061ad60c86bbb1b6440b7c77ef428c12f5251206cef0cae68",
+          "sha1": "c7228dd94a9c338856dcb37cf90343804ebfe8df",
+          "md5": "8aa5bab059396eab3271d7d0a0640564"
+        }
+      ]
+    },
+    {
+      "name": "runtimeElements",
+      "attributes": {
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.jvm.environment": "standard-jvm",
+        "org.gradle.jvm.version": 17,
+        "org.gradle.libraryelements": "jar",
+        "org.gradle.usage": "java-runtime",
+        "org.jetbrains.kotlin.platform.type": "jvm"
+      },
+      "dependencies": [
+        {
+          "group": "ch.qos.logback",
+          "module": "logback-classic",
+          "version": {
+            "requires": "1.4.14"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "1.9.25"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "alertum-logging-1.0.12.jar",
+          "url": "alertum-logging-1.0.12.jar",
+          "size": 30134,
+          "sha512": "6cd222b4baed422ab74de3761173328d5d4d211822ff302f6d95aeffb688aca9c0fc83fa371c95f75a2e3e847e536ba92f0f614a3e284220d75218aa5e40bc53",
+          "sha256": "cabe4fd3c8f73b7061ad60c86bbb1b6440b7c77ef428c12f5251206cef0cae68",
+          "sha1": "c7228dd94a9c338856dcb37cf90343804ebfe8df",
+          "md5": "8aa5bab059396eab3271d7d0a0640564"
+        }
+      ]
+    },
+    {
+      "name": "sourcesElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "alertum-logging-1.0.12-sources.jar",
+          "url": "alertum-logging-1.0.12-sources.jar",
+          "size": 8806,
+          "sha512": "bbec84a3a3947287496bbfd18f3737463aba7c2bd21cfaa7ba5588ac48cb3fda34c954c208cfae405e1bee80e45829e429ccbd57288d8f126ede08fa8838673f",
+          "sha256": "2043d47467e6510a033056d46536dbcc53b9fdbc35db26357afb0bd0cb6d211d",
+          "sha1": "fe49166e2326e1a1660968920ee7bb46a05edc8f",
+          "md5": "ec0da63f134b13675e18b221f0b31801"
+        }
+      ]
+    },
+    {
+      "name": "javadocElements",
+      "attributes": {
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "javadoc",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "alertum-logging-1.0.12-javadoc.jar",
+          "url": "alertum-logging-1.0.12-javadoc.jar",
+          "size": 261,
+          "sha512": "2b0493bbecc027bc891d0446223f7954794d3bdc1eeed0b41fe2a6e0d2a6f3c99564a5816c21b06c5d1fd3ef541d97170ad6f0264c468f1cfefb29e86ed21262",
+          "sha256": "e6567cf470d20cb29a835af0916d49b41c5cd6cbdb3adc57c232465e409719ef",
+          "sha1": "a909f3392e1930526ad00d09303dc342689daaee",
+          "md5": "12e5acf7ee174cf934dc413c5b7c9de9"
+        }
+      ]
+    }
+  ]
+}
