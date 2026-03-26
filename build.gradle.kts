@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "io.github.arditmete"
-version = "1.0.12"
+version = "1.0.25"
 
 repositories {
     mavenCentral()
@@ -19,6 +19,8 @@ java {
 
 dependencies {
     implementation("ch.qos.logback:logback-classic:1.4.14")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.2")
     annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
     compileOnly("org.springframework.boot:spring-boot-autoconfigure:3.2.5")
     compileOnly("org.springframework:spring-web:6.1.6")
