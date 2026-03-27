@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+
+# IntelliJ
+.idea/
+*.iml
+out/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+
+# Local env
+.env
+
+# Generated artifacts
+*.jar
+*.war
+*.zip
+*.class
+
+# Maven local repo artifacts (your case)
+build/repo/
+
+# Kotlin/Gradle caches
+**/build/
+**/.gradle/
