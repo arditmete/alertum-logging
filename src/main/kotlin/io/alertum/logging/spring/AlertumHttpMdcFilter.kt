@@ -62,6 +62,7 @@ class AlertumHttpMdcFilter(
             try {
                 setMdcValue("statusCode", statusCode.toString(), overrideExisting = true)
                 setMdcValue("durationMs", durationMs.toString(), overrideExisting = true)
+                setMdcValue("error", (statusCode >= 500).toString(), overrideExisting = true)
             } catch (_: Exception) {
                 // best effort only
             } finally {
@@ -115,10 +116,7 @@ class AlertumHttpMdcFilter(
 
     private fun shouldLogRequest(request: HttpServletRequest): Boolean {
         if (request.method == "OPTIONS") return false
-        val path = request.requestURI ?: return false
-        if (path.startsWith("/api/logs/ingest")) return false
-        if (path.startsWith("/api/traces/ingest")) return false
-        return true
+        return request.requestURI != null
     }
 
     private class StatusCaptureResponseWrapper(

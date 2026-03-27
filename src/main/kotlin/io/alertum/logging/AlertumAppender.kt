@@ -6,35 +6,33 @@ import ch.qos.logback.classic.spi.LoggingEventVO
 import ch.qos.logback.core.AppenderBase
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import java.io.ByteArrayOutputStream
-import java.net.URI
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
-import java.nio.charset.StandardCharsets
-import java.time.Duration
-import java.util.concurrent.Executors
+import redis.clients.jedis.JedisPool
+import redis.clients.jedis.JedisPoolConfig
+import redis.clients.jedis.StreamEntryID
+import java.util.UUID
 import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import java.util.zip.GZIPOutputStream
 
 class AlertumAppender : AppenderBase<ILoggingEvent>() {
 
-    @Volatile private var ingestionKey: String = ""
-    @Volatile private var endpoint: String = AlertumDefaults.DEFAULT_ENDPOINT
+    @Volatile private var teamId: String = System.getenv("ALERTUM_TEAM_ID")?.trim().orEmpty()
     @Volatile private var service: String = AlertumDefaults.DEFAULT_SERVICE
     @Volatile private var environment: String = AlertumDefaults.DEFAULT_ENVIRONMENT
 
-    @Volatile private var batchSize: Int = 50
-    @Volatile private var flushIntervalMillis: Long = 1000
-    @Volatile private var queueCapacity: Int = 2000
-    @Volatile private var requestTimeoutMillis: Long = 3000
-    @Volatile private var stopJoinMillis: Long = 5000
-    @Volatile private var gzipEnabled: Boolean = false
+    @Volatile private var redisHost: String =
+        System.getenv("ALERTUM_REDIS_HOST")?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_REDIS_HOST
+    @Volatile private var redisPort: Int =
+        System.getenv("ALERTUM_REDIS_PORT")?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_REDIS_PORT
+    @Volatile private var redisPassword: String? =
+        System.getenv("ALERTUM_REDIS_PASSWORD")?.trim()?.takeIf { it.isNotEmpty() }
+    @Volatile private var streamKey: String =
+        System.getenv("ALERTUM_REDIS_STREAM_KEY")?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_STREAM_KEY
+    @Volatile private var queueCapacity: Int =
+        System.getenv("ALERTUM_QUEUE_CAPACITY")?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_QUEUE_CAPACITY
+    @Volatile private var dropWhenFull: Boolean =
+        System.getenv("ALERTUM_DROP_WHEN_FULL")?.trim()?.lowercase()?.let { parseBooleanValue(it) } ?: true
 
     private val running = AtomicBoolean(false)
 
@@ -45,28 +43,20 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
     private var workerThread: Thread? = null
 
     @Volatile
-    private var retryScheduler: ScheduledExecutorService? = null
+    private var jedisPool: JedisPool? = null
 
     private val droppedLogs = AtomicLong(0)
-    private val sentBatches = AtomicLong(0)
-    private val failedBatches = AtomicLong(0)
-
-    private val httpClient: HttpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(3))
-            .build()
-
-    private val pipelineDebugEnabled = java.lang.Boolean.getBoolean("alertum.pipeline.debug")
+    private val sentLogs = AtomicLong(0)
+    private val failedLogs = AtomicLong(0)
+    private val lastWarnAt = AtomicLong(0)
 
     private val objectMapper: ObjectMapper = ObjectMapper().registerKotlinModule()
 
     // ---------------- SETTERS ----------------
 
-    fun setIngestionKey(value: String) {
-        ingestionKey = value.trim()
-    }
-
-    fun setEndpoint(value: String) {
-        endpoint = value.trim().ifEmpty { AlertumDefaults.DEFAULT_ENDPOINT }
+    fun setTeamId(value: String) {
+        if (isStarted) return
+        teamId = value.trim()
     }
 
     fun setService(value: String) {
@@ -77,35 +67,44 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         environment = value.trim().ifBlank { AlertumDefaults.DEFAULT_ENVIRONMENT }
     }
 
-    fun setBatchSize(value: Int) {
-        if (value > 0) batchSize = value
+    fun setRedisHost(value: String) {
+        if (isStarted) return
+        redisHost = value.trim().ifEmpty { DEFAULT_REDIS_HOST }
     }
 
-    fun setFlushIntervalMillis(value: Long) {
-        if (value > 0) flushIntervalMillis = value
+    fun setRedisPort(value: Int) {
+        if (isStarted) return
+        if (value > 0) {
+            redisPort = value
+        }
+    }
+
+    fun setRedisPassword(value: String) {
+        if (isStarted) return
+        redisPassword = value.trim().ifEmpty { null }
+    }
+
+    fun setStreamKey(value: String) {
+        if (isStarted) return
+        streamKey = value.trim().ifEmpty { DEFAULT_STREAM_KEY }
     }
 
     fun setQueueCapacity(value: Int) {
-        if (!isStarted && value > 0) queueCapacity = value
+        if (isStarted) return
+        if (value > 0) {
+            queueCapacity = value
+        }
     }
 
-    fun setRequestTimeoutMillis(value: Long) {
-        if (value > 0) requestTimeoutMillis = value
-    }
-
-    fun setStopJoinMillis(value: Long) {
-        if (value > 0) stopJoinMillis = value
-    }
-
-    fun setGzipEnabled(value: Boolean) {
-        gzipEnabled = value
+    fun setDropWhenFull(value: Boolean) {
+        dropWhenFull = value
     }
 
     fun getDroppedLogs(): Long = droppedLogs.get()
 
-    fun getSentBatches(): Long = sentBatches.get()
+    fun getSentBatches(): Long = sentLogs.get()
 
-    fun getFailedBatches(): Long = failedBatches.get()
+    fun getFailedBatches(): Long = failedLogs.get()
 
     fun getQueueSize(): Int = queue.size
 
@@ -113,140 +112,33 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
     override fun start() {
         if (isStarted) return
 
-        println("ALERTUM APPENDER STARTING")
+        val resolvedTeam = teamId.trim()
+        if (resolvedTeam.isEmpty()) {
+            addError("AlertumAppender failed to start: teamId is required")
+            return
+        }
+        teamId = resolvedTeam
+
+        queue = LinkedBlockingQueue(queueCapacity)
+
+        val pool = try {
+            JedisPool(buildPoolConfig(), redisHost, redisPort, REDIS_TIMEOUT_MS, redisPassword)
+        } catch (ex: Exception) {
+            addError("AlertumAppender failed to start: unable to initialize Redis pool", ex)
+            return
+        }
+        jedisPool = pool
+
         super.start()
 
-        try {
-            if (ingestionKey.isBlank()) {
-                addWarn("AlertumAppender started without ingestionKey — will wait for config")
+        if (running.compareAndSet(false, true)) {
+            workerThread = Thread(::workerLoop, "alertum-redis-stream-worker").apply {
+                isDaemon = true
+                start()
             }
-            addWarn("INGESTION KEY = [$ingestionKey]")
-            if (endpoint.contains("\${")) {
-                addWarn("Endpoint not resolved yet — waiting for config")
-            }
-
-            pipelineDebug("AlertumAppender start called. endpoint=$endpoint service=$service environment=$environment")
-
-            queue = LinkedBlockingQueue(queueCapacity)
-            addWarn("QUEUE SIZE = ${queue.size}")
-            pipelineDebug("QUEUE SIZE = ${queue.size}")
-            ensureRetryScheduler()
-
-            if (running.compareAndSet(false, true)) {
-                workerThread = Thread(::workerLoop, "alertum-log-worker").apply {
-                    isDaemon = true
-                    start()
-                }
-                println("WORKER STARTED")
-                pipelineDebug("Worker thread started: ${workerThread?.isAlive}")
-            }
-
-            Thread {
-                try {
-                    if (ingestionKey.isBlank()) return@Thread
-                    if (!endpoint.startsWith("http")) return@Thread
-                    if (endpoint.contains("\${")) return@Thread
-                    testConnection()
-                } catch (ex: Exception) {
-                    addWarn("Alertum not reachable at startup: ${ex.message}")
-                }
-            }.apply { isDaemon = true }.start()
-        } catch (ex: Exception) {
-            addError("AlertumAppender failed to initialize", ex)
-        }
-    }
-
-    private fun sendAsync(
-        payload: String,
-        events: List<ILoggingEvent>,
-        attempt: Int,
-        requeueAttempted: Boolean
-    ) {
-        if (!running.get()) return
-        if (ingestionKey.isBlank()) {
-            println("SEND SKIPPED: ingestionKey is blank")
-            return
-        }
-        if (!endpoint.startsWith("http")) {
-            println("SEND SKIPPED: endpoint is not http ($endpoint)")
-            return
-        }
-        if (endpoint.contains("\${")) {
-            println("SEND SKIPPED: endpoint not resolved ($endpoint)")
-            return
         }
 
-        val request = try {
-            buildRequest(payload)
-        } catch (ex: Exception) {
-            failedBatches.incrementAndGet()
-            println("SEND FAILED: request build error")
-            ex.printStackTrace()
-            addError("AlertumAppender failed to build request", ex)
-            return
-        }
-
-        if (attempt == 0) {
-            pipelineDebug("AlertumAppender sending batch of ${payload.length} chars to ${ingestUri()}")
-        }
-
-        println("SENDING LOG TO: ${request.uri()}")
-        println("FINAL JSON PAYLOAD: $payload")
-
-        httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .whenComplete { response, error ->
-                    try {
-                        if (error != null) {
-                            println("SEND FAILED: ${error.message}")
-                            error.printStackTrace()
-                            handleRetryableFailure(payload, events, attempt, requeueAttempted, error)
-                            return@whenComplete
-                        }
-
-                        val status = response.statusCode()
-                        println("RESPONSE STATUS: $status")
-                        if (status in 200..299) {
-                            sentBatches.incrementAndGet()
-                            return@whenComplete
-                        }
-
-                        if (status >= 500) {
-                            val body = response.body()
-                            if (!body.isNullOrBlank()) {
-                                println("RESPONSE BODY: $body")
-                            }
-                            handleRetryableFailure(payload, events, attempt, requeueAttempted, null)
-                            return@whenComplete
-                        }
-
-                        failedBatches.incrementAndGet()
-                        addWarn("AlertumAppender send failed status=$status")
-                        val body = response.body()
-                        if (!body.isNullOrBlank()) {
-                            println("RESPONSE BODY: $body")
-                        }
-                        if (!requeueAttempted) {
-                            tryRequeue(events)
-                        }
-                    } catch (ex: Exception) {
-                        failedBatches.incrementAndGet()
-                        println("SEND FAILED: ${ex.message}")
-                        ex.printStackTrace()
-                        addError("AlertumAppender send failed", ex)
-                        if (!requeueAttempted) {
-                            tryRequeue(events)
-                        }
-                    }
-                }
-    }
-
-    private fun ingestUri(): URI {
-        val base = endpoint.trim().removeSuffix("/")
-        return when {
-            base.endsWith("/api/logs/ingest") -> URI.create(base)
-            base.endsWith("/api/logs") -> URI.create("$base/ingest")
-            else -> URI.create("$base/api/logs/ingest")
-        }
+        addInfo("AlertumAppender started (redis-streams) stream=$streamKey host=$redisHost:$redisPort")
     }
 
     override fun stop() {
@@ -257,68 +149,44 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
 
         workerThread?.interrupt()
         try {
-            workerThread?.join(stopJoinMillis)
+            workerThread?.join(DEFAULT_STOP_JOIN_MS)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
         }
         workerThread = null
 
-        retryScheduler?.shutdownNow()
-        retryScheduler = null
+        jedisPool?.close()
+        jedisPool = null
 
-        addWarn("AlertumAppender stopped. sent=${sentBatches.get()} failed=${failedBatches.get()} dropped=${droppedLogs.get()}")
+        addInfo(
+            "AlertumAppender stopped. sent=${sentLogs.get()} failed=${failedLogs.get()} dropped=${droppedLogs.get()}"
+        )
 
         super.stop()
     }
 
     override fun append(event: ILoggingEvent) {
-        println("APPENDER RECEIVED: ${event.formattedMessage}")
-        addWarn("APPENDER RECEIVED: level=${event.level} logger=${event.loggerName} msg=${event.formattedMessage}")
         if (!isStarted) return
 
         try {
-            pipelineDebug("Appender received event: ${event.formattedMessage ?: ""}")
             event.prepareForDeferredProcessing()
             val snapshot = LoggingEventVO.build(event)
-            if (!enqueueEvent(snapshot)) {
-                val dropped = droppedLogs.incrementAndGet()
-                if (dropped == 1L || dropped % DROP_WARN_EVERY == 0L) {
-                    addWarn("Dropped logs=$dropped")
+            if (!queue.offer(snapshot)) {
+                if (!dropWhenFull && tryEvictFor(snapshot.level) && queue.offer(snapshot)) {
+                    return
                 }
+                droppedLogs.incrementAndGet()
             }
-        } catch (ex: Exception) {
-            addError("Failed to enqueue log event", ex)
+        } catch (_: Exception) {
+            // best effort only
         }
     }
 
-    private fun enqueueEvent(event: ILoggingEvent): Boolean {
-        if (queue.offer(event)) return true
-        if (pipelineDebugEnabled && queue.remainingCapacity() == 0) {
-            addError("Queue is full")
-        }
-
-        val level = event.level
-        if (level.isGreaterOrEqual(Level.WARN)) {
-            if (evictLowerPriority()) {
-                return queue.offer(event)
-            }
-        }
-
-        return false
-    }
-
-    private fun evictLowerPriority(): Boolean {
-        if (evictFirstMatching { it.level == Level.TRACE || it.level == Level.DEBUG }) {
-            return true
-        }
-        return evictFirstMatching { it.level == Level.INFO }
-    }
-
-    private fun evictFirstMatching(match: (ILoggingEvent) -> Boolean): Boolean {
+    private fun tryEvictFor(level: Level): Boolean {
         val iterator = queue.iterator()
         while (iterator.hasNext()) {
             val candidate = iterator.next()
-            if (match(candidate)) {
+            if (candidate.level.toInt() < level.toInt()) {
                 iterator.remove()
                 droppedLogs.incrementAndGet()
                 return true
@@ -330,215 +198,164 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
     // ---------------- WORKER ----------------
 
     private fun workerLoop() {
-        val batch = ArrayList<ILoggingEvent>(batchSize)
+        val buffer = ArrayList<ILoggingEvent>(MAX_DRAIN)
 
         while (running.get() || queue.isNotEmpty()) {
             try {
-                val first = queue.poll(flushIntervalMillis, TimeUnit.MILLISECONDS)
-                if (first != null) {
-                    batch.add(first)
-                    queue.drainTo(batch, batchSize - 1)
-                }
+                val first = queue.poll(POLL_INTERVAL_MS, TimeUnit.MILLISECONDS) ?: continue
+                buffer.add(first)
+                queue.drainTo(buffer, MAX_DRAIN - 1)
 
-                if (batch.isNotEmpty()) {
-                    val snapshot = ArrayList(batch)
-                    val requeueAttempted = snapshot.any { it is RequeuedLoggingEvent }
-                    try {
-                        for (event in snapshot) {
-                            println("DEQUEUED EVENT: ${event.formattedMessage}")
-                        }
-                        pipelineDebug("Sending batch size=${snapshot.size} queueSize=${queue.size}")
-                        val payload = buildPayload(snapshot)
-                        sendAsync(payload, snapshot, 0, requeueAttempted)
-                    } catch (ex: Exception) {
-                        failedBatches.incrementAndGet()
-                        droppedLogs.addAndGet(snapshot.size.toLong())
-                        addError("AlertumAppender failed to build payload", ex)
-                    } finally {
-                        batch.clear()
-                    }
+                if (buffer.isNotEmpty()) {
+                    sendBuffer(buffer)
+                    buffer.clear()
                 }
             } catch (ex: InterruptedException) {
-                if (!running.get()) {
-                    break
-                }
+                if (!running.get()) break
                 Thread.currentThread().interrupt()
-            } catch (ex: Exception) {
-                addError("AlertumAppender worker failure", ex)
+            } catch (_: Exception) {
+                // best effort only
             }
         }
     }
 
-    private fun handleRetryableFailure(
-        payload: String,
-        events: List<ILoggingEvent>,
-        attempt: Int,
-        requeueAttempted: Boolean,
-        error: Throwable?
-    ) {
-        if (attempt < MAX_RETRIES) {
-            scheduleRetry(payload, events, attempt + 1, requeueAttempted)
-            return
-        }
-
-        failedBatches.incrementAndGet()
-        addWarn("AlertumAppender send failed after retries${error?.message?.let { ": $it" } ?: ""}")
-        if (!requeueAttempted) {
-            tryRequeue(events)
-        }
-    }
-
-    private fun scheduleRetry(
-        payload: String,
-        events: List<ILoggingEvent>,
-        attempt: Int,
-        requeueAttempted: Boolean
-    ) {
-        val scheduler = retryScheduler
-        if (scheduler == null || scheduler.isShutdown) {
-            failedBatches.incrementAndGet()
-            if (!requeueAttempted) {
-                tryRequeue(events)
-            }
-            return
-        }
-
-        val delay = RETRY_BACKOFF_MS[(attempt - 1).coerceIn(0, RETRY_BACKOFF_MS.lastIndex)]
+    private fun sendBuffer(events: List<ILoggingEvent>) {
+        val pool = jedisPool ?: return
         try {
-            scheduler.schedule(
-                { sendAsync(payload, events, attempt, requeueAttempted) },
-                delay,
-                TimeUnit.MILLISECONDS
-            )
-        } catch (_: RejectedExecutionException) {
-            failedBatches.incrementAndGet()
-            if (!requeueAttempted) {
-                tryRequeue(events)
+            pool.resource.use { jedis ->
+                for (event in events) {
+                    val payload = buildPayload(event)
+                    jedis.xadd(streamKey, StreamEntryID.NEW_ENTRY, mapOf(PAYLOAD_FIELD to payload))
+                }
             }
-        }
-    }
-
-    private fun tryRequeue(events: List<ILoggingEvent>) {
-        val queueRef = queue
-        if (queueRef.remainingCapacity() < events.size) {
+            sentLogs.addAndGet(events.size.toLong())
+        } catch (ex: Exception) {
+            failedLogs.addAndGet(events.size.toLong())
             droppedLogs.addAndGet(events.size.toLong())
-            return
-        }
-
-        var enqueued = 0
-        for (event in events) {
-            val wrapped = if (event is RequeuedLoggingEvent) event else RequeuedLoggingEvent(event)
-            if (queueRef.offer(wrapped)) {
-                enqueued++
-            } else {
-                break
-            }
-        }
-
-        val dropped = events.size - enqueued
-        if (dropped > 0) {
-            droppedLogs.addAndGet(dropped.toLong())
-        }
-    }
-
-    private fun ensureRetryScheduler() {
-        if (retryScheduler != null && retryScheduler?.isShutdown == false) return
-        retryScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
-            Thread(runnable, "alertum-log-retry").apply { isDaemon = true }
-        }
-    }
-
-    private fun pipelineDebug(message: String) {
-        if (pipelineDebugEnabled) {
-            addWarn(message)
-        }
-    }
-
-    private fun testConnection() {
-        val request = HttpRequest.newBuilder()
-                .uri(ingestUri())
-                .timeout(Duration.ofSeconds(2))
-                .header("X-API-Key", ingestionKey)
-                .POST(HttpRequest.BodyPublishers.noBody())
-                .build()
-
-        val response = httpClient.send(request, HttpResponse.BodyHandlers.discarding())
-
-        if (response.statusCode() in 200..299) {
-            addWarn("Alertum connection OK")
-        } else {
-            addWarn("Alertum connection failed status=${response.statusCode()}")
+            maybeWarn(ex)
         }
     }
 
     // ---------------- PAYLOAD ----------------
 
-    private fun buildPayload(events: List<ILoggingEvent>): String {
-        val entries = events.map { event ->
-            val mdc = event.mdcPropertyMap.orEmpty()
-            val serviceValue = mdc["service"]?.takeIf { it.isNotBlank() } ?: service
-            val environmentValue = mdc["environment"]?.takeIf { it.isNotBlank() } ?: environment
+    private fun buildPayload(event: ILoggingEvent): String {
+        val mdc = event.mdcPropertyMap ?: emptyMap()
+        val endpoint = mdc[MDC_ENDPOINT]?.takeIf { it.isNotBlank() } ?: ""
+        val statusCode = parseInt(mdc[MDC_STATUS_CODE]) ?: 0
+        val durationMs = parseLong(mdc[MDC_DURATION_MS]) ?: 0L
+        val traceId = mdc[MDC_TRACE_ID]?.takeIf { it.isNotBlank() }
+        val spanId = mdc[MDC_SPAN_ID]?.takeIf { it.isNotBlank() }
+        val explicitError = parseBoolean(mdc[MDC_ERROR])
+        val error = explicitError ?: (event.level.isGreaterOrEqual(Level.ERROR) || statusCode >= 500)
+        val metadata = extractMetadata(mdc)
 
-            LogEntry(
-                message = event.formattedMessage ?: "",
-                level = event.level.levelStr,
-                timestamp = event.timeStamp,
-                logger = event.loggerName?.takeIf { it.isNotBlank() },
-                thread = event.threadName?.takeIf { it.isNotBlank() },
-                service = serviceValue.takeIf { it.isNotBlank() },
-                environment = environmentValue.takeIf { it.isNotBlank() }
-            )
+        val record = StreamLogRecord(
+            logId = UUID.randomUUID().toString(),
+            timestamp = event.timeStamp,
+            level = event.level.levelStr,
+            message = event.formattedMessage ?: "",
+            service = service,
+            environment = environment,
+            teamId = teamId,
+            endpoint = endpoint,
+            statusCode = statusCode,
+            durationMs = durationMs,
+            error = error,
+            traceId = traceId,
+            spanId = spanId,
+            metadata = metadata
+        )
+        return objectMapper.writeValueAsString(record)
+    }
+
+    private fun extractMetadata(mdc: Map<String, String>): Map<String, String>? {
+        if (mdc.isEmpty()) return null
+        val result = LinkedHashMap<String, String>()
+        for ((key, value) in mdc) {
+            if (value.isBlank() || key in CORE_MDC_KEYS) continue
+            result[key] = value
         }
-
-        val payload = LogPayload(entries)
-        return objectMapper.writeValueAsString(payload)
+        return result.takeIf { it.isNotEmpty() }
     }
 
-    private fun buildRequest(payload: String): HttpRequest {
-        val builder = HttpRequest.newBuilder()
-                .uri(ingestUri())
-                .timeout(Duration.ofMillis(requestTimeoutMillis))
-                .header("Content-Type", "application/json")
-                .header("X-API-Key", ingestionKey)
+    private fun parseInt(raw: String?): Int? = raw?.trim()?.toIntOrNull()
 
-        if (gzipEnabled) {
-            builder.header("Content-Encoding", "gzip")
-            builder.POST(HttpRequest.BodyPublishers.ofByteArray(gzip(payload)))
-        } else {
-            builder.POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
+    private fun parseLong(raw: String?): Long? = raw?.trim()?.toLongOrNull()
+
+    private fun parseBoolean(raw: String?): Boolean? = raw?.trim()?.lowercase()?.let { parseBooleanValue(it) }
+
+    private fun parseBooleanValue(value: String): Boolean? = when (value) {
+        "true", "1", "yes", "y" -> true
+        "false", "0", "no", "n" -> false
+        else -> null
+    }
+
+    private fun buildPoolConfig(): JedisPoolConfig {
+        return JedisPoolConfig().apply {
+            maxTotal = DEFAULT_POOL_MAX_TOTAL
+            maxIdle = DEFAULT_POOL_MAX_IDLE
+            minIdle = DEFAULT_POOL_MIN_IDLE
+            testOnBorrow = true
         }
-
-        return builder.build()
     }
 
-    private fun gzip(value: String): ByteArray {
-        val bytes = value.toByteArray(StandardCharsets.UTF_8)
-        val out = ByteArrayOutputStream()
-        GZIPOutputStream(out).use { it.write(bytes) }
-        return out.toByteArray()
+    private fun maybeWarn(ex: Exception) {
+        val now = System.currentTimeMillis()
+        val last = lastWarnAt.get()
+        if (now - last < WARN_INTERVAL_MS) return
+        if (lastWarnAt.compareAndSet(last, now)) {
+            addWarn("AlertumAppender Redis stream write failed: ${ex.message}")
+        }
     }
 
-    private class RequeuedLoggingEvent(
-        private val delegate: ILoggingEvent
-    ) : ILoggingEvent by delegate
+    private data class StreamLogRecord(
+        val logId: String,
+        val timestamp: Long,
+        val level: String,
+        val message: String,
+        val service: String,
+        val environment: String,
+        val teamId: String,
+        val endpoint: String,
+        val statusCode: Int,
+        val durationMs: Long,
+        val error: Boolean,
+        val traceId: String?,
+        val spanId: String?,
+        val metadata: Map<String, String>?
+    )
 
     companion object {
-        private const val MAX_RETRIES = 3
-        private val RETRY_BACKOFF_MS = longArrayOf(200L, 500L, 1_000L)
-        private const val DROP_WARN_EVERY = 100L
+        private const val DEFAULT_QUEUE_CAPACITY = 5_000
+        private const val DEFAULT_STOP_JOIN_MS = 2_000L
+        private const val DEFAULT_REDIS_HOST = "localhost"
+        private const val DEFAULT_REDIS_PORT = 6379
+        private const val DEFAULT_STREAM_KEY = "alertum:logs"
+        private const val REDIS_TIMEOUT_MS = 2_000
+        private const val MAX_DRAIN = 200
+        private const val POLL_INTERVAL_MS = 10L
+        private const val WARN_INTERVAL_MS = 30_000L
+
+        private const val DEFAULT_POOL_MAX_TOTAL = 8
+        private const val DEFAULT_POOL_MAX_IDLE = 4
+        private const val DEFAULT_POOL_MIN_IDLE = 1
+
+        private const val PAYLOAD_FIELD = "payload"
+
+        private const val MDC_ENDPOINT = "endpoint"
+        private const val MDC_STATUS_CODE = "statusCode"
+        private const val MDC_DURATION_MS = "durationMs"
+        private const val MDC_TRACE_ID = "traceId"
+        private const val MDC_SPAN_ID = "spanId"
+        private const val MDC_ERROR = "error"
+
+        private val CORE_MDC_KEYS = setOf(
+            MDC_ENDPOINT,
+            MDC_STATUS_CODE,
+            MDC_DURATION_MS,
+            MDC_TRACE_ID,
+            MDC_SPAN_ID,
+            MDC_ERROR
+        )
     }
-
-    private data class LogPayload(
-        val logs: List<LogEntry>
-    )
-
-    private data class LogEntry(
-        val message: String,
-        val level: String,
-        val timestamp: Long,
-        val logger: String?,
-        val thread: String?,
-        val service: String?,
-        val environment: String?
-    )
 }

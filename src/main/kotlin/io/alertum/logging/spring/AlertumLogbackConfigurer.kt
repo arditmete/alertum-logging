@@ -37,13 +37,10 @@ class AlertumLogbackConfigurer(
     }
 
     private fun applyProperties(appender: AlertumAppender) {
-        properties.apiKeyOrNull()?.let {
-            appender.setIngestionKey(it)
+        properties.teamIdOrNull()?.let {
+            appender.setTeamId(it)
         }
 
-        properties.endpoint?.trim()?.takeIf { it.isNotBlank() }?.let {
-            appender.setEndpoint(it)
-        }
         properties.service?.trim()?.takeIf { it.isNotBlank() }?.let {
             appender.setService(it)
         }

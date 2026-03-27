@@ -7,17 +7,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 class AlertumLoggingProperties {
 
     var enabled: Boolean = true
-    var apiKey: String? = null
-    var endpoint: String? = null
+    var teamId: String? = null
     var service: String? = null
     var environment: String? = null
 
-    fun apiKeyOrNull(): String? =
-            apiKey?.trim()?.takeIf { it.isNotBlank() }
-
-    fun endpointOrDefault(): String =
-            endpoint?.trim().takeUnless { it.isNullOrBlank() }
-                    ?: AlertumDefaults.DEFAULT_ENDPOINT
+    fun teamIdOrNull(): String? =
+            teamId?.trim()?.takeIf { it.isNotBlank() }
 
     fun serviceOrDefault(): String =
             service?.trim().takeUnless { it.isNullOrBlank() }
