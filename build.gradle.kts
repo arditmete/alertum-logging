@@ -1,12 +1,14 @@
+import com.google.protobuf.gradle.*
+
 plugins {
     kotlin("jvm") version "1.9.25"
-    kotlin("plugin.spring") version "1.9.25"
+    id("com.google.protobuf") version "0.9.4"
     `maven-publish`
     signing
 }
 
 group = "io.github.arditmete"
-version = "1.0.36"
+version = "1.0.39"
 
 repositories {
     mavenCentral()
@@ -16,16 +18,44 @@ java {
     withSourcesJar()
     withJavadocJar()
 }
-
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(17))
+    }
+}
+kotlin {
+    jvmToolchain(17)
+}
 dependencies {
     implementation("ch.qos.logback:logback-classic:1.4.14")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.17.2")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.2")
-    implementation("redis.clients:jedis:5.1.0")
-    annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
+    implementation("io.grpc:grpc-netty-shaded:1.64.0")
+    implementation("io.grpc:grpc-protobuf:1.64.0")
+    implementation("io.grpc:grpc-stub:1.64.0")
+    implementation("javax.annotation:javax.annotation-api:1.3.2")
+    implementation("com.google.protobuf:protobuf-java:3.25.3")
     compileOnly("org.springframework.boot:spring-boot-autoconfigure:3.2.5")
     compileOnly("org.springframework:spring-web:6.1.6")
     compileOnly("jakarta.servlet:jakarta.servlet-api:6.0.0")
+}
+
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:3.25.3"
+    }
+    plugins {
+        id("grpc") {
+            artifact = "io.grpc:protoc-gen-grpc-java:1.64.0"
+        }
+    }
+    generateProtoTasks {
+        all().forEach { task ->
+            task.plugins {
+                id("grpc")
+            }
+        }
+    }
 }
 
 publishing {

@@ -4,59 +4,65 @@ import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.classic.spi.LoggingEventVO
 import ch.qos.logback.core.AppenderBase
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import redis.clients.jedis.JedisPool
-import redis.clients.jedis.JedisPoolConfig
-import redis.clients.jedis.StreamEntryID
+import io.alertum.logs.v1.LogEntry
 import java.util.UUID
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class AlertumAppender : AppenderBase<ILoggingEvent>() {
 
     @Volatile private var teamId: String = System.getenv("ALERTUM_TEAM_ID")?.trim().orEmpty()
+    @Volatile private var apiKey: String? = System.getenv("ALERTUM_API_KEY")?.trim()?.takeIf { it.isNotEmpty() }
     @Volatile private var service: String = AlertumDefaults.DEFAULT_SERVICE
     @Volatile private var environment: String = AlertumDefaults.DEFAULT_ENVIRONMENT
 
-    @Volatile private var redisHost: String =
-        System.getenv("ALERTUM_REDIS_HOST")?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_REDIS_HOST
-    @Volatile private var redisPort: Int =
-        System.getenv("ALERTUM_REDIS_PORT")?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_REDIS_PORT
-    @Volatile private var redisPassword: String? =
-        System.getenv("ALERTUM_REDIS_PASSWORD")?.trim()?.takeIf { it.isNotEmpty() }
-    @Volatile private var streamKey: String =
-        System.getenv("ALERTUM_REDIS_STREAM_KEY")?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_STREAM_KEY
-    @Volatile private var queueCapacity: Int =
-        System.getenv("ALERTUM_QUEUE_CAPACITY")?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_QUEUE_CAPACITY
-    @Volatile private var dropWhenFull: Boolean =
-        System.getenv("ALERTUM_DROP_WHEN_FULL")?.trim()?.lowercase()?.let { parseBooleanValue(it) } ?: true
+    @Volatile private var ingestionHost: String =
+        System.getenv("ALERTUM_INGESTION_HOST")?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT_INGESTION_HOST
+    @Volatile private var ingestionPort: Int =
+        System.getenv("ALERTUM_INGESTION_PORT")?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_INGESTION_PORT
+
+    @Volatile private var batchSize: Int =
+        System.getenv("ALERTUM_BATCH_SIZE")?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_BATCH_SIZE
+    @Volatile private var flushIntervalMs: Long =
+        System.getenv("ALERTUM_FLUSH_INTERVAL_MS")?.toLongOrNull()?.takeIf { it > 0 } ?: DEFAULT_FLUSH_INTERVAL_MS
+    @Volatile private var maxQueueSize: Int =
+        System.getenv("ALERTUM_MAX_QUEUE_SIZE")?.toIntOrNull()?.takeIf { it > 0 }
+            ?: System.getenv("ALERTUM_QUEUE_CAPACITY")?.toIntOrNull()?.takeIf { it > 0 }
+            ?: DEFAULT_MAX_QUEUE_SIZE
 
     private val running = AtomicBoolean(false)
 
     @Volatile
-    private var queue = LinkedBlockingQueue<ILoggingEvent>(queueCapacity)
+    private var queue = LinkedBlockingQueue<ILoggingEvent>(maxQueueSize)
 
     @Volatile
     private var workerThread: Thread? = null
 
     @Volatile
-    private var jedisPool: JedisPool? = null
+    private var transport: AlertumGrpcTransport? = null
 
-    private val droppedLogs = AtomicLong(0)
-    private val sentLogs = AtomicLong(0)
-    private val failedLogs = AtomicLong(0)
-    private val lastWarnAt = AtomicLong(0)
-
-    private val objectMapper: ObjectMapper = ObjectMapper().registerKotlinModule()
+    private val logsQueued = AtomicLong(0)
+    private val logsSent = AtomicLong(0)
+    private val logsDropped = AtomicLong(0)
+    private val batchesSent = AtomicLong(0)
+    private val retries = AtomicLong(0)
+    private val inFlightBatches = AtomicInteger(0)
+    private val lastOverflowWarnAt = AtomicLong(0)
+    private val lastFailureWarnAt = AtomicLong(0)
 
     // ---------------- SETTERS ----------------
 
     fun setTeamId(value: String) {
         if (isStarted) return
         teamId = value.trim()
+    }
+
+    fun setApiKey(value: String) {
+        if (isStarted) return
+        apiKey = value.trim().ifEmpty { null }
     }
 
     fun setService(value: String) {
@@ -67,44 +73,40 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         environment = value.trim().ifBlank { AlertumDefaults.DEFAULT_ENVIRONMENT }
     }
 
-    fun setRedisHost(value: String) {
+    fun setIngestionHost(value: String) {
         if (isStarted) return
-        redisHost = value.trim().ifEmpty { DEFAULT_REDIS_HOST }
+        ingestionHost = value.trim().ifEmpty { DEFAULT_INGESTION_HOST }
     }
 
-    fun setRedisPort(value: Int) {
+    fun setIngestionPort(value: Int) {
         if (isStarted) return
-        if (value > 0) {
-            redisPort = value
-        }
+        if (value > 0) ingestionPort = value
     }
 
-    fun setRedisPassword(value: String) {
+    fun setBatchSize(value: Int) {
         if (isStarted) return
-        redisPassword = value.trim().ifEmpty { null }
+        if (value > 0) batchSize = value
     }
 
-    fun setStreamKey(value: String) {
+    fun setFlushIntervalMs(value: Long) {
         if (isStarted) return
-        streamKey = value.trim().ifEmpty { DEFAULT_STREAM_KEY }
+        if (value > 0) flushIntervalMs = value
     }
 
-    fun setQueueCapacity(value: Int) {
+    fun setMaxQueueSize(value: Int) {
         if (isStarted) return
-        if (value > 0) {
-            queueCapacity = value
-        }
+        if (value > 0) maxQueueSize = value
     }
 
-    fun setDropWhenFull(value: Boolean) {
-        dropWhenFull = value
-    }
+    fun getLogsQueued(): Long = logsQueued.get()
 
-    fun getDroppedLogs(): Long = droppedLogs.get()
+    fun getLogsSent(): Long = logsSent.get()
 
-    fun getSentBatches(): Long = sentLogs.get()
+    fun getLogsDropped(): Long = logsDropped.get()
 
-    fun getFailedBatches(): Long = failedLogs.get()
+    fun getBatchesSent(): Long = batchesSent.get()
+
+    fun getRetries(): Long = retries.get()
 
     fun getQueueSize(): Int = queue.size
 
@@ -119,26 +121,37 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         }
         teamId = resolvedTeam
 
-        queue = LinkedBlockingQueue(queueCapacity)
+        queue = LinkedBlockingQueue(maxQueueSize)
 
-        val pool = try {
-            JedisPool(buildPoolConfig(), redisHost, redisPort, REDIS_TIMEOUT_MS, redisPassword)
-        } catch (ex: Exception) {
-            addError("AlertumAppender failed to start: unable to initialize Redis pool", ex)
-            return
-        }
-        jedisPool = pool
+        transport = AlertumGrpcTransport(
+            host = ingestionHost,
+            port = ingestionPort,
+            apiKey = apiKey,
+            sdkVersion = SDK_VERSION,
+            source = SDK_SOURCE,
+            onSuccess = { count ->
+                logsSent.addAndGet(count.toLong())
+                batchesSent.incrementAndGet()
+                inFlightBatches.decrementAndGet()
+            },
+            onFailure = { count, _ ->
+                logsDropped.addAndGet(count.toLong())
+                inFlightBatches.decrementAndGet()
+                maybeWarnFailure()
+            },
+            onRetry = { retries.incrementAndGet() }
+        )
 
         super.start()
 
         if (running.compareAndSet(false, true)) {
-            workerThread = Thread(::workerLoop, "alertum-redis-stream-worker").apply {
+            workerThread = Thread(::workerLoop, "alertum-grpc-worker").apply {
                 isDaemon = true
                 start()
             }
         }
 
-        addInfo("AlertumAppender started (redis-streams) stream=$streamKey host=$redisHost:$redisPort")
+        addInfo("AlertumAppender started (grpc) host=$ingestionHost port=$ingestionPort")
     }
 
     override fun stop() {
@@ -155,11 +168,14 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         }
         workerThread = null
 
-        jedisPool?.close()
-        jedisPool = null
+        flushRemaining(DEFAULT_STOP_JOIN_MS)
+        awaitInFlight(DEFAULT_STOP_JOIN_MS)
+
+        transport?.shutdown(DEFAULT_STOP_JOIN_MS)
+        transport = null
 
         addInfo(
-            "AlertumAppender stopped. sent=${sentLogs.get()} failed=${failedLogs.get()} dropped=${droppedLogs.get()}"
+            "AlertumAppender stopped. queued=${logsQueued.get()} sent=${logsSent.get()} dropped=${logsDropped.get()} batches=${batchesSent.get()} retries=${retries.get()}"
         )
 
         super.stop()
@@ -172,43 +188,42 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
             event.prepareForDeferredProcessing()
             val snapshot = LoggingEventVO.build(event)
             if (!queue.offer(snapshot)) {
-                if (!dropWhenFull && tryEvictFor(snapshot.level) && queue.offer(snapshot)) {
-                    return
-                }
-                droppedLogs.incrementAndGet()
+                logsDropped.incrementAndGet()
+                maybeWarnOverflow()
+            } else {
+                logsQueued.incrementAndGet()
             }
         } catch (_: Exception) {
             // best effort only
         }
     }
 
-    private fun tryEvictFor(level: Level): Boolean {
-        val iterator = queue.iterator()
-        while (iterator.hasNext()) {
-            val candidate = iterator.next()
-            if (candidate.level.toInt() < level.toInt()) {
-                iterator.remove()
-                droppedLogs.incrementAndGet()
-                return true
-            }
-        }
-        return false
-    }
-
     // ---------------- WORKER ----------------
 
     private fun workerLoop() {
-        val buffer = ArrayList<ILoggingEvent>(MAX_DRAIN)
+        val batch = ArrayList<ILoggingEvent>(batchSize)
 
         while (running.get() || queue.isNotEmpty()) {
             try {
                 val first = queue.poll(POLL_INTERVAL_MS, TimeUnit.MILLISECONDS) ?: continue
-                buffer.add(first)
-                queue.drainTo(buffer, MAX_DRAIN - 1)
+                batch.add(first)
 
-                if (buffer.isNotEmpty()) {
-                    sendBuffer(buffer)
-                    buffer.clear()
+                val deadline = System.currentTimeMillis() + flushIntervalMs
+                while (batch.size < batchSize) {
+                    val remaining = deadline - System.currentTimeMillis()
+                    if (remaining <= 0L) break
+
+                    val next = queue.poll(minOf(POLL_INTERVAL_MS, remaining), TimeUnit.MILLISECONDS)
+                    if (next != null) {
+                        batch.add(next)
+                    } else {
+                        break
+                    }
+                }
+
+                if (batch.isNotEmpty()) {
+                    sendBatch(batch)
+                    batch.clear()
                 }
             } catch (ex: InterruptedException) {
                 if (!running.get()) break
@@ -219,26 +234,17 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         }
     }
 
-    private fun sendBuffer(events: List<ILoggingEvent>) {
-        val pool = jedisPool ?: return
-        try {
-            pool.resource.use { jedis ->
-                for (event in events) {
-                    val payload = buildPayload(event)
-                    jedis.xadd(streamKey, StreamEntryID.NEW_ENTRY, mapOf(PAYLOAD_FIELD to payload))
-                }
-            }
-            sentLogs.addAndGet(events.size.toLong())
-        } catch (ex: Exception) {
-            failedLogs.addAndGet(events.size.toLong())
-            droppedLogs.addAndGet(events.size.toLong())
-            maybeWarn(ex)
+    private fun sendBatch(events: List<ILoggingEvent>) {
+        val grpcBatch = ArrayList<LogEntry>(events.size)
+        for (event in events) {
+            grpcBatch.add(mapToGrpc(event))
         }
+        if (grpcBatch.isEmpty()) return
+        inFlightBatches.incrementAndGet()
+        transport?.send(grpcBatch)
     }
 
-    // ---------------- PAYLOAD ----------------
-
-    private fun buildPayload(event: ILoggingEvent): String {
+    private fun mapToGrpc(event: ILoggingEvent): LogEntry {
         val mdc = event.mdcPropertyMap ?: emptyMap()
         val endpoint = mdc[MDC_ENDPOINT]?.takeIf { it.isNotBlank() } ?: ""
         val statusCode = parseInt(mdc[MDC_STATUS_CODE]) ?: 0
@@ -249,23 +255,24 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         val error = explicitError ?: (event.level.isGreaterOrEqual(Level.ERROR) || statusCode >= 500)
         val metadata = extractMetadata(mdc)
 
-        val record = StreamLogRecord(
-            logId = UUID.randomUUID().toString(),
-            timestamp = event.timeStamp,
-            level = event.level.levelStr,
-            message = event.formattedMessage ?: "",
-            service = service,
-            environment = environment,
-            teamId = teamId,
-            endpoint = endpoint,
-            statusCode = statusCode,
-            durationMs = durationMs,
-            error = error,
-            traceId = traceId,
-            spanId = spanId,
-            metadata = metadata
-        )
-        return objectMapper.writeValueAsString(record)
+        val builder = LogEntry.newBuilder()
+            .setLogId(UUID.randomUUID().toString())
+            .setTimestampUnixMs(event.timeStamp)
+            .setLevel(event.level.levelStr)
+            .setMessage(event.formattedMessage ?: "")
+            .setService(service)
+            .setEnvironment(environment)
+            .setTeamId(teamId)
+            .setEndpoint(endpoint)
+            .setStatusCode(statusCode)
+            .setDurationMs(durationMs)
+            .setError(error)
+
+        if (traceId != null) builder.setTraceId(traceId)
+        if (spanId != null) builder.setSpanId(spanId)
+        if (metadata != null) builder.putAllMetadata(metadata)
+
+        return builder.build()
     }
 
     private fun extractMetadata(mdc: Map<String, String>): Map<String, String>? {
@@ -290,57 +297,63 @@ class AlertumAppender : AppenderBase<ILoggingEvent>() {
         else -> null
     }
 
-    private fun buildPoolConfig(): JedisPoolConfig {
-        return JedisPoolConfig().apply {
-            maxTotal = DEFAULT_POOL_MAX_TOTAL
-            maxIdle = DEFAULT_POOL_MAX_IDLE
-            minIdle = DEFAULT_POOL_MIN_IDLE
-            testOnBorrow = true
-        }
-    }
-
-    private fun maybeWarn(ex: Exception) {
+    private fun maybeWarnOverflow() {
         val now = System.currentTimeMillis()
-        val last = lastWarnAt.get()
+        val last = lastOverflowWarnAt.get()
         if (now - last < WARN_INTERVAL_MS) return
-        if (lastWarnAt.compareAndSet(last, now)) {
-            addWarn("AlertumAppender Redis stream write failed: ${ex.message}")
+        if (lastOverflowWarnAt.compareAndSet(last, now)) {
+            addWarn("AlertumAppender queue full. Dropping logs. queueSize=${queue.size} maxQueueSize=$maxQueueSize")
         }
     }
 
-    private data class StreamLogRecord(
-        val logId: String,
-        val timestamp: Long,
-        val level: String,
-        val message: String,
-        val service: String,
-        val environment: String,
-        val teamId: String,
-        val endpoint: String,
-        val statusCode: Int,
-        val durationMs: Long,
-        val error: Boolean,
-        val traceId: String?,
-        val spanId: String?,
-        val metadata: Map<String, String>?
-    )
+    private fun maybeWarnFailure() {
+        val now = System.currentTimeMillis()
+        val last = lastFailureWarnAt.get()
+        if (now - last < WARN_INTERVAL_MS) return
+        if (lastFailureWarnAt.compareAndSet(last, now)) {
+            addError("AlertumAppender gRPC send failed. Dropping batch.")
+        }
+    }
+
+    private fun flushRemaining(timeoutMs: Long) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        val batch = ArrayList<ILoggingEvent>(batchSize)
+
+        while (System.currentTimeMillis() < deadline && queue.isNotEmpty()) {
+            queue.drainTo(batch, batchSize)
+            if (batch.isNotEmpty()) {
+                sendBatch(batch)
+                batch.clear()
+            } else {
+                break
+            }
+        }
+    }
+
+    private fun awaitInFlight(timeoutMs: Long) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (inFlightBatches.get() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(INFLIGHT_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+    }
 
     companion object {
-        private const val DEFAULT_QUEUE_CAPACITY = 5_000
+        private const val DEFAULT_BATCH_SIZE = 50
+        private const val DEFAULT_FLUSH_INTERVAL_MS = 2_000L
+        private const val DEFAULT_MAX_QUEUE_SIZE = 10_000
         private const val DEFAULT_STOP_JOIN_MS = 2_000L
-        private const val DEFAULT_REDIS_HOST = "localhost"
-        private const val DEFAULT_REDIS_PORT = 6379
-        private const val DEFAULT_STREAM_KEY = "alertum:logs"
-        private const val REDIS_TIMEOUT_MS = 2_000
-        private const val MAX_DRAIN = 200
-        private const val POLL_INTERVAL_MS = 10L
+        private const val DEFAULT_INGESTION_HOST = "localhost"
+        private const val DEFAULT_INGESTION_PORT = 9090
+        private const val POLL_INTERVAL_MS = 25L
         private const val WARN_INTERVAL_MS = 30_000L
-
-        private const val DEFAULT_POOL_MAX_TOTAL = 8
-        private const val DEFAULT_POOL_MAX_IDLE = 4
-        private const val DEFAULT_POOL_MIN_IDLE = 1
-
-        private const val PAYLOAD_FIELD = "payload"
+        private const val INFLIGHT_POLL_MS = 25L
+        private const val SDK_VERSION = "alertum-logging"
+        private const val SDK_SOURCE = "logback"
 
         private const val MDC_ENDPOINT = "endpoint"
         private const val MDC_STATUS_CODE = "statusCode"

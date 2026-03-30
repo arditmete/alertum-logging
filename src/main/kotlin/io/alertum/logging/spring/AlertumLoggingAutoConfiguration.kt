@@ -9,18 +9,24 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.core.Ordered
 import org.springframework.web.filter.OncePerRequestFilter
-
 @Configuration
 @EnableConfigurationProperties(AlertumLoggingProperties::class)
 @ConditionalOnClass(AlertumAppender::class)
-@ConditionalOnProperty(prefix = "alertum.logging", name = ["enabled"], havingValue = "true", matchIfMissing = true)
-class AlertumLoggingAutoConfiguration {
+@ConditionalOnProperty(
+        prefix = "alertum.logging",
+        name = ["enabled"],
+        havingValue = "true",
+        matchIfMissing = true
+)
+open class AlertumLoggingAutoConfiguration {
 
     @Bean
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     @ConditionalOnClass(OncePerRequestFilter::class)
     @ConditionalOnMissingBean
-    fun alertumHttpMdcFilter(properties: AlertumLoggingProperties): AlertumHttpMdcFilter {
+    open fun alertumHttpMdcFilter(
+            properties: AlertumLoggingProperties
+    ): AlertumHttpMdcFilter {
         return AlertumHttpMdcFilter(properties)
     }
 
@@ -28,7 +34,7 @@ class AlertumLoggingAutoConfiguration {
     @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
     @ConditionalOnClass(FilterRegistrationBean::class)
     @ConditionalOnMissingBean
-    fun alertumHttpMdcFilterRegistration(
+    open fun alertumHttpMdcFilterRegistration(
             filter: AlertumHttpMdcFilter
     ): FilterRegistrationBean<AlertumHttpMdcFilter> {
         return FilterRegistrationBean(filter).apply {
@@ -39,7 +45,9 @@ class AlertumLoggingAutoConfiguration {
     @Bean
     @ConditionalOnClass(LoggerContext::class)
     @ConditionalOnMissingBean
-    fun alertumLogbackConfigurer(properties: AlertumLoggingProperties): AlertumLogbackConfigurer {
+    open fun alertumLogbackConfigurer(
+            properties: AlertumLoggingProperties
+    ): AlertumLogbackConfigurer {
         return AlertumLogbackConfigurer(properties)
     }
 
